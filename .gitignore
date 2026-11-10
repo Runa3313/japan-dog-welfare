@@ -1,0 +1,10 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+renv/library/
+renv/staging/
+_freeze/
+analysis/*_files/
+analysis/*.html
+.DS_Store
