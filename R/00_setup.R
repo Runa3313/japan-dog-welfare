@@ -21,7 +21,9 @@ install.packages(c(
   "MASS",       # glm.nb（Negative Binomial回帰）
   "quarto",     # レポートのレンダリング
   "shiny",      # ダッシュボード（任意）
-  "here"        # プロジェクトのルートからファイルの場所を指定する
+  "here",       # プロジェクトのルートからファイルの場所を指定する
+  "strucchange", # 構造変化（変化点）の検定
+  "VGAM"        # beta-binomialモデル
 ))
 
 # ---- STEP 3：使ったパッケージとバージョンを renv.lock に記録する ------------
