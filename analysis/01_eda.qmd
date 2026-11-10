@@ -1,0 +1,197 @@
+---
+title: "Japan's Public Shelter Dogs: Trends and Regional Variation"
+subtitle: "EDA 01 — national trend (RQ1) and municipal adoption rates (RQ2)"
+author: "Runa Yoshioka"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(scales)
+
+national <- read_csv(here::here("data/processed/national_timeseries.csv"), show_col_types = FALSE)
+municipal <- read_csv(here::here("data/processed/municipal_r06.csv"), show_col_types = FALSE)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+## Data
+
+Official statistics from Japan's Ministry of the Environment (環境省), extracted from PDF by `R/01_extract_pdf.R` and validated against the published totals. Definitions are in `DATA_DICTIONARY.md`.
+
+Two caveats shape everything below:
+
+- The national series (FY2004–2024) reports **returns and adoptions combined** (返還・譲渡数). Adoptions alone are only available for FY2024 by municipality.
+- Outcomes in a year are not a subset of that year's intake: dogs taken in one fiscal year may leave in the next. Rates below are "per dog taken in", not true probabilities.
+
+## RQ1. How has the national picture changed since FY2004?
+
+```{r}
+#| label: rq1-data
+dog_ts <- national |>
+  filter(species == "dog") |>
+  mutate(euthanasia_rate = euthanized / intake,
+         returned_adopted_rate = returned_adopted / intake)
+```
+
+```{r}
+#| label: fig-rq1-counts
+#| fig-cap: "Dog intake, returns + adoptions, and euthanasia at public shelters (log scale)"
+dog_ts |>
+  tidyr::pivot_longer(c(intake, returned_adopted, euthanized),
+                      names_to = "measure", values_to = "dogs") |>
+  mutate(measure = factor(measure,
+                          levels = c("intake", "returned_adopted", "euthanized"),
+                          labels = c("Intake", "Returned + adopted", "Euthanized"))) |>
+  ggplot(aes(fiscal_year, dogs, colour = measure)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  scale_y_log10(labels = label_comma()) +
+  scale_colour_manual(values = c("grey40", "#2b6cb0", "#c0392b")) +
+  labs(x = "Fiscal year", y = "Dogs (log scale)", colour = NULL) +
+  theme(legend.position = "top")
+```
+
+```{r}
+#| label: fig-rq1-rate
+#| fig-cap: "Euthanized dogs per dog taken in"
+ggplot(dog_ts, aes(fiscal_year, euthanasia_rate)) +
+  geom_line(linewidth = 1, colour = "#c0392b") +
+  geom_point(size = 1.5, colour = "#c0392b") +
+  scale_y_continuous(labels = label_percent(), limits = c(0, NA)) +
+  labs(x = "Fiscal year", y = "Euthanized / intake")
+```
+
+```{r}
+#| label: rq1-summary
+first <- dog_ts |> filter(fiscal_year == 2004)
+last  <- dog_ts |> filter(fiscal_year == 2024)
+```
+
+**Findings.**
+
+- Euthanasia fell from `r comma(first$euthanized)` dogs in FY2004 to `r comma(last$euthanized)` in FY2024, about `r round(first$euthanized / last$euthanized)` times fewer.
+- Most of that fall came from **fewer dogs entering shelters** (intake fell from `r comma(first$intake)` to `r comma(last$intake)`). Returns + adoptions rose until about FY2011 and then declined together with intake, so their *share* of intake rose from `r percent(first$returned_adopted_rate, 1)` to `r percent(last$returned_adopted_rate, 1)`.
+- The euthanasia rate has **plateaued at about 11% since FY2021**, after falling steadily for 15 years.
+
+**Hypotheses to test next** (not yet established):
+
+- Policy change: the amended Act on Welfare and Management of Animals, promulgated in September 2012 and in force from 1 September 2013, made lifelong care an explicit owner duty and allowed prefectures and cities to refuse intake requests that conflict with it, such as repeated surrenders or surrenders because a pet is old or ill ([Ministry of the Environment](https://www.env.go.jp/nature/dobutsu/aigo/2_data/pamph/h2508b/full.pdf)). Test whether the intake and euthanasia trends change after FY2013 (structural break test). Owner surrenders are not reported separately before FY2024 in this series, so their direct effect cannot be isolated here.
+- The plateau may reflect that the remaining euthanasia is mostly category ① ("not suitable for adoption": 74% of dog euthanasia in FY2024, see below), which better adoption services alone cannot reduce.
+
+## RQ2. Do municipalities really differ in adoption rates?
+
+Comparing raw rates across municipalities is misleading: a municipality that took in 5 dogs can show 0% or 100% by chance. A **funnel plot** compares each municipality with the national rate, with control limits that widen as the number of dogs shrinks.
+
+Under a binomial model with common rate $p_0$, a municipality with $n$ dogs has an adoption rate within
+$p_0 \pm z \sqrt{p_0 (1 - p_0) / n}$ about 95% ($z = 1.96$) or 99.8% ($z = 3.09$) of the time.
+
+```{r}
+#| label: rq2-data
+dogs <- municipal |>
+  filter(species == "dog", intake_total > 0) |>
+  mutate(adoption_rate = adopted / intake_total)
+
+p0 <- sum(dogs$adopted) / sum(dogs$intake_total)
+
+limits <- tibble(n = seq(1, max(dogs$intake_total), length.out = 400)) |>
+  mutate(se = sqrt(p0 * (1 - p0) / n),
+         lo95 = pmax(p0 - 1.96 * se, 0), hi95 = pmin(p0 + 1.96 * se, 1),
+         lo998 = pmax(p0 - 3.09 * se, 0), hi998 = pmin(p0 + 3.09 * se, 1))
+
+dogs <- dogs |>
+  mutate(z = (adoption_rate - p0) / sqrt(p0 * (1 - p0) / intake_total),
+         flag = case_when(z > 3.09 ~ "Above 99.8% limit",
+                          z < -3.09 ~ "Below 99.8% limit",
+                          TRUE ~ "Within limits"))
+
+dispersion <- sum(dogs$z^2) / (nrow(dogs) - 1)
+```
+
+```{r}
+#| label: fig-rq2-funnel
+#| fig-cap: "Funnel plot of dog adoption rates by municipality, FY2024"
+ggplot(dogs, aes(intake_total, adoption_rate)) +
+  geom_line(data = limits, aes(n, lo95), linetype = "dashed", colour = "grey60") +
+  geom_line(data = limits, aes(n, hi95), linetype = "dashed", colour = "grey60") +
+  geom_line(data = limits, aes(n, lo998), colour = "grey40") +
+  geom_line(data = limits, aes(n, hi998), colour = "grey40") +
+  geom_hline(yintercept = p0, colour = "grey20") +
+  geom_point(aes(colour = flag, shape = jurisdiction_type), size = 2.2, alpha = 0.85) +
+  scale_colour_manual(values = c("Above 99.8% limit" = "#2b6cb0",
+                                 "Below 99.8% limit" = "#c0392b",
+                                 "Within limits" = "grey55")) +
+  scale_y_continuous(labels = label_percent(), limits = c(0, 1)) +
+  scale_x_continuous(labels = label_comma()) +
+  labs(x = "Dogs taken in (FY2024)", y = "Adopted / intake",
+       colour = NULL, shape = NULL) +
+  theme(legend.position = "right")
+```
+
+**Findings.**
+
+- National adoption rate: `r percent(p0, 0.1)` of dogs taken in.
+- `r sum(dogs$flag != "Within limits")` of `r nrow(dogs)` municipalities fall outside the 99.8% limits (`r sum(dogs$flag == "Above 99.8% limit")` above, `r sum(dogs$flag == "Below 99.8% limit")` below). If the binomial model were true we would expect fewer than one.
+- The dispersion ratio is `r round(dispersion, 1)` (≈ 1 under the binomial model). The variation is far larger than chance: **municipalities genuinely differ**, and the next step is a model that allows for this (beta-binomial, or a random-effects logistic regression).
+
+```{r}
+#| label: tbl-rq2-extremes
+dogs |>
+  filter(flag != "Within limits") |>
+  arrange(desc(z)) |>
+  slice(c(1:5, (n() - 4):n())) |>
+  transmute(Municipality = jurisdiction, Type = jurisdiction_type,
+            `Dogs taken in` = intake_total, Adopted = adopted,
+            `Adoption rate` = percent(adoption_rate, 1), z = round(z, 1)) |>
+  knitr::kable(caption = "Five highest and five lowest municipalities (outside 99.8% limits)")
+```
+
+**Why might they differ? (hypotheses, not findings)**
+
+- **Return rate:** municipalities that return many dogs to owners have fewer left to adopt. A fairer measure is adopted / (intake − returned).
+- **Partnerships with rescue groups:** "adoption" includes transfers to rescue organisations. High rates may reflect strong partnerships rather than more families adopting.
+- **Mix of dogs:** the share of unweaned puppies and stray adult dogs differs by region.
+
+These are exactly the questions that shelter interviews (Phase 2) can answer and public data cannot.
+
+## Preview: why dogs are euthanized (RQ4)
+
+```{r}
+#| label: tbl-rq4-national
+municipal |>
+  filter(species == "dog") |>
+  summarise(across(c(euthanized_1, euthanized_2, euthanized_3, euthanized_total), \(x) sum(x, na.rm = TRUE))) |>
+  tidyr::pivot_longer(everything(), names_to = "category", values_to = "dogs") |>
+  mutate(share = percent(dogs / dogs[category == "euthanized_total"], 1),
+         category = c("① Not suitable for adoption (illness, aggression)",
+                      "② Other (no adopter found, capacity limits)",
+                      "③ Died after intake",
+                      "Total")) |>
+  knitr::kable(caption = "Dog euthanasia by category, FY2024, all municipalities")
+```
+
+Category ② — the euthanasia most directly linked to finding adopters or shelter capacity — is already small nationally. Category ① is a veterinary judgement made by each municipality, so its variation across municipalities is worth examining next.
+
+## Limitations
+
+- Aggregate data only: conclusions apply to municipalities, not to individual dogs (ecological fallacy).
+- Prefecture figures exclude designated and core cities inside the prefecture.
+- Private rescue groups' outcomes (after transfer from public shelters) are not in the data.
+- The FY2012 euthanasia total in the source PDF does not equal dogs + cats (difference of 180); the dog figure is used as published.
+
+## Next steps
+
+1. Structural break test for RQ1 (around FY2013).
+2. Beta-binomial / random-effects model for RQ2, using adopted / (intake − returned).
+3. Municipal variation in euthanasia categories (RQ4).

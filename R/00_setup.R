@@ -20,7 +20,8 @@ install.packages(c(
   "duckdb",     # RからSQLで集計（サーバー不要）
   "MASS",       # glm.nb（Negative Binomial回帰）
   "quarto",     # レポートのレンダリング
-  "shiny"       # ダッシュボード（任意）
+  "shiny",      # ダッシュボード（任意）
+  "here"        # プロジェクトのルートからファイルの場所を指定する
 ))
 
 # ---- STEP 3：使ったパッケージとバージョンを renv.lock に記録する ------------
