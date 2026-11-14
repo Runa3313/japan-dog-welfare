@@ -5,6 +5,7 @@
 # 出力
 #   data/processed/national_timeseries.csv  全国の推移（平成16年度〜令和6年度）
 #   data/processed/municipal_r06.csv        自治体別（令和6年度、犬・猫）
+#   data/processed/municipal_panel.csv      自治体別（令和元年度〜令和6年度、犬・猫）
 #
 # 方針：PDFのテキストを「行」単位で読み、数字の並び（トークン）の個数で
 #       どの表のどの行かを判定する。数字の個数が想定と違う行があれば止める
@@ -30,7 +31,8 @@ dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
 
 # PDFを行のベクトルにする（ページをまたいで連結）
 pdf_lines <- function(path) {
-  pdf_text(path) |> str_split("\n") |> unlist()
+  pdf_text(path) |> str_split("\n") |> unlist() |>
+    str_replace_all("[\u2010\u2011\u2012\u2013\u2014\u2212\uFF0D]", "-")  # 「‐」などのダッシュを "-" にそろえる
 }
 
 # "12,300" -> 12300, "-" -> NA（"-" は該当なし・未計上）
@@ -104,92 +106,112 @@ warning("原典PDFの不一致（犬+猫≠合計）：", paste(mismatch, collap
 national_ts <- national_ts |>
   mutate(source_inconsistency = species == "total" & fiscal_year %in% mismatch)
 
-# ---- 2. 自治体別（r07_municipal.pdf） ---------------------------------------
+# ---- 2. 自治体別（r02〜r07_municipal.pdf） ---------------------------------
+# ファイル名の rXX は「事務提要」の版。対象年度は1年前（r07 = 令和6年度）。
 # 1自治体 = 3行
 #   上段（12値）：犬[返還, 譲渡, 殺処分①, ②, ③, 計] 猫[同]
 #   中段（自治体名 + 16値）：犬[飼い主から 成熟, 幼齢, 所有者不明 成熟, 幼齢, 合計 成熟, 幼齢]
 #                            猫[同] 犬猫合計[引取り, 返還, 譲渡, 殺処分]
 #   下段（12値）：上段のうち幼齢個体
 
-mun_lines <- pdf_lines(file.path(RAW, "r07_municipal.pdf"))
-nonblank  <- mun_lines[str_trim(mun_lines) != ""]
+# PDFでセルが空欄のため値が1つ足りない行。位置を確認したうえで NA を入れる。
+# （自治体の合計 = 合計行 の検証で、位置が正しいことを確かめている）
+blank_cells <- tribble(
+  ~file, ~jurisdiction, ~insert_at,  # insert_at = 中段の値のうち何番目が空欄か
+  "r05", "明石市",       4L          # 犬・所有者不明・幼齢 が空欄（令和4年度）
+)
 
-is_mid <- map_lgl(nonblank, function(l) {
-  tk <- tokens(l)
-  length(tk) == 17 && !is_num_token(tk[1]) && all(is_num_token(tk[-1]))
-})
-mid_idx <- which(is_mid)
-
-parse_row <- function(i) {
-  top <- tokens(nonblank[i - 1]); mid <- tokens(nonblank[i]); bot <- tokens(nonblank[i + 1])
-  if (length(top) != 12 || length(bot) != 12 ||
-      !all(is_num_token(top)) || !all(is_num_token(bot))) {
-    stop("想定外の行構成：", mid[1])
-  }
-  top <- to_num(top); bot <- to_num(bot); m <- to_num(mid[-1])
-  one <- function(sp, o_in, o_out) tibble(
-    jurisdiction = mid[1], species = sp,
-    intake_owner_adult   = m[o_in + 1], intake_owner_young   = m[o_in + 2],
-    intake_unknown_adult = m[o_in + 3], intake_unknown_young = m[o_in + 4],
-    intake_total_adult   = m[o_in + 5], intake_total_young   = m[o_in + 6],
-    returned = top[o_out + 1], adopted = top[o_out + 2],
-    euthanized_1 = top[o_out + 3], euthanized_2 = top[o_out + 4],
-    euthanized_3 = top[o_out + 5], euthanized_total = top[o_out + 6],
-    returned_young = bot[o_out + 1], adopted_young = bot[o_out + 2],
-    euthanized_1_young = bot[o_out + 3], euthanized_2_young = bot[o_out + 4],
-    euthanized_3_young = bot[o_out + 5], euthanized_total_young = bot[o_out + 6]
-  )
-  bind_rows(one("dog", 0, 0), one("cat", 6, 6))
-}
-
-municipal_all <- map_dfr(mid_idx, parse_row) |>
-  mutate(intake_total = intake_total_adult + coalesce(intake_total_young, 0))
-
-# 政令指定都市（20市）。それ以外の「市」は中核市として扱う
 designated <- c("札幌市", "仙台市", "さいたま市", "千葉市", "横浜市", "川崎市", "相模原市",
                 "新潟市", "静岡市", "浜松市", "名古屋市", "京都市", "大阪市", "堺市", "神戸市",
                 "岡山市", "広島市", "北九州市", "福岡市", "熊本市")
 
-municipal_all <- municipal_all |>
-  mutate(jurisdiction_type = case_when(
-    jurisdiction == "合計"           ~ "national_total",
-    jurisdiction %in% designated     ~ "designated_city",
-    str_ends(jurisdiction, "市")     ~ "core_city",
-    str_ends(jurisdiction, "[都道府県]") ~ "prefecture",
-    TRUE ~ NA_character_
-  ), fiscal_year = 2024L, .before = 1)
+parse_municipal <- function(file) {
+  lines <- pdf_lines(file.path(RAW, paste0(file, "_municipal.pdf")))
+  nonblank <- lines[str_trim(lines) != ""]
+  fy <- era_to_year(str_extract(paste(nonblank[1:5], collapse = " "), "令和\\S+年度"))
 
-stopifnot(!anyNA(municipal_all$jurisdiction_type),
-          sum(municipal_all$jurisdiction_type == "prefecture") / 2 == 47,
-          sum(municipal_all$jurisdiction_type == "designated_city") / 2 == 20)
+  is_mid <- map_lgl(nonblank, function(l) {
+    tk <- tokens(l)
+    length(tk) >= 16 && !is_num_token(tk[1]) && all(is_num_token(tk[-1]))
+  })
 
-# ---- 3. 検証 ---------------------------------------------------------------
-# (a) 自治体の合計 = PDFの「合計」行
-total_row <- municipal_all |> filter(jurisdiction == "合計")
-municipal <- municipal_all |> filter(jurisdiction != "合計")
+  parse_row <- function(i) {
+    top <- tokens(nonblank[i - 1]); mid <- tokens(nonblank[i]); bot <- tokens(nonblank[i + 1])
+    name <- mid[1]; m <- mid[-1]
+    if (length(m) == 15) {
+      fix <- blank_cells |> filter(.data$file == !!file, jurisdiction == name)
+      if (nrow(fix) != 1) stop(file, "：値が1つ足りない行（未登録）：", name)
+      m <- append(m, "-", after = fix$insert_at - 1)
+    }
+    if (length(m) != 16 || length(top) != 12 || length(bot) != 12 ||
+        !all(is_num_token(top)) || !all(is_num_token(bot))) {
+      stop(file, "：想定外の行構成：", name)
+    }
+    top <- to_num(top); bot <- to_num(bot); m <- to_num(m)
+    one <- function(sp, o_in, o_out) tibble(
+      jurisdiction = name, species = sp,
+      intake_owner_adult   = m[o_in + 1], intake_owner_young   = m[o_in + 2],
+      intake_unknown_adult = m[o_in + 3], intake_unknown_young = m[o_in + 4],
+      intake_total_adult   = m[o_in + 5], intake_total_young   = m[o_in + 6],
+      returned = top[o_out + 1], adopted = top[o_out + 2],
+      euthanized_1 = top[o_out + 3], euthanized_2 = top[o_out + 4],
+      euthanized_3 = top[o_out + 5], euthanized_total = top[o_out + 6],
+      returned_young = bot[o_out + 1], adopted_young = bot[o_out + 2],
+      euthanized_1_young = bot[o_out + 3], euthanized_2_young = bot[o_out + 4],
+      euthanized_3_young = bot[o_out + 5], euthanized_total_young = bot[o_out + 6]
+    )
+    bind_rows(one("dog", 0, 0), one("cat", 6, 6))
+  }
 
-num_cols <- names(municipal)[sapply(municipal, is.numeric) & names(municipal) != "fiscal_year"]
-sums <- municipal |> group_by(species) |> summarise(across(all_of(num_cols), \(x) sum(x, na.rm = TRUE)))
-cmp  <- total_row |> select(species, all_of(num_cols)) |> arrange(species)
-diff <- as.matrix(sums |> arrange(species) |> select(-species)) - as.matrix(cmp |> select(-species))
-if (any(diff != 0, na.rm = TRUE)) {
-  print(which(diff != 0, arr.ind = TRUE)); stop("自治体の合計がPDFの合計行と一致しない")
+  all_rows <- map_dfr(which(is_mid), parse_row) |>
+    mutate(intake_total = coalesce(intake_total_adult, 0) + coalesce(intake_total_young, 0),
+           jurisdiction_type = case_when(
+             jurisdiction == "合計"               ~ "national_total",
+             jurisdiction %in% designated         ~ "designated_city",
+             str_ends(jurisdiction, "市")         ~ "core_city",
+             str_ends(jurisdiction, "[都道府県]") ~ "prefecture",
+             TRUE ~ NA_character_),
+           fiscal_year = fy, .before = 1)
+
+  stopifnot(!anyNA(all_rows$jurisdiction_type),
+            sum(all_rows$jurisdiction_type == "prefecture") / 2 == 47,
+            sum(all_rows$jurisdiction_type == "designated_city") / 2 == 20,
+            sum(all_rows$jurisdiction == "合計") == 2)
+
+  # ---- 検証 (a) 自治体の合計 = PDFの「合計」行 ----
+  total_row <- all_rows |> filter(jurisdiction == "合計")
+  mun <- all_rows |> filter(jurisdiction != "合計")
+  num_cols <- names(mun)[sapply(mun, is.numeric) & names(mun) != "fiscal_year"]
+  sums <- mun |> group_by(species) |> summarise(across(all_of(num_cols), \(x) sum(x, na.rm = TRUE)))
+  cmp  <- total_row |> select(species, all_of(num_cols)) |> mutate(across(-species, \(x) coalesce(x, 0)))
+  d <- as.matrix(sums |> arrange(species) |> select(-species)) - as.matrix(cmp |> arrange(species) |> select(-species))
+  if (any(d != 0)) {
+    bad <- which(d != 0, arr.ind = TRUE)
+    stop(file, "（", fy, "年度）：自治体の合計が合計行と一致しない列：",
+         paste(unique(colnames(d)[bad[, 2]]), collapse = ", "))
+  }
+
+  # ---- 検証 (b) 犬の合計行 = 全国の推移表の同じ年度 ----
+  dt <- total_row |> filter(species == "dog"); nt <- national_wide |> filter(fiscal_year == fy)
+  if (!(dt$intake_total == nt$dog_intake &&
+        dt$returned + dt$adopted == nt$dog_returned_adopted &&
+        dt$euthanized_total == nt$dog_euthanized)) {
+    stop(file, "（", fy, "年度）：犬の合計が全国の推移表と一致しない")
+  }
+  message(sprintf("  %s → %d年度：%d自治体、検証OK", file, fy, n_distinct(mun$jurisdiction)))
+  mun
 }
 
-# (b) 犬の合計行 = 全国PDFの令和6年度の値（引取り17,399 / 返還+譲渡15,427 / 殺処分1,964）
-dog_tot <- total_row |> filter(species == "dog")
-nat_r6  <- national_wide |> filter(fiscal_year == 2024)
-stopifnot(
-  dog_tot$intake_total == nat_r6$dog_intake,
-  dog_tot$returned + dog_tot$adopted == nat_r6$dog_returned_adopted,
-  dog_tot$euthanized_total == nat_r6$dog_euthanized
-)
+municipal_panel <- map_dfr(c("r02", "r03", "r04", "r05", "r06", "r07"), parse_municipal) |>
+  relocate(intake_total, .after = intake_total_young)
+municipal <- municipal_panel |> filter(fiscal_year == 2024)
 
-# ---- 4. 保存 ---------------------------------------------------------------
+# ---- 3. 保存 ---------------------------------------------------------------
 write_csv(national_ts, file.path(OUT, "national_timeseries.csv"), na = "")
-write_csv(municipal |> relocate(intake_total, .after = intake_total_young),
-          file.path(OUT, "municipal_r06.csv"), na = "")
+write_csv(municipal, file.path(OUT, "municipal_r06.csv"), na = "")
+write_csv(municipal_panel, file.path(OUT, "municipal_panel.csv"), na = "")
 
-message(sprintf("OK: national_timeseries.csv (%d rows), municipal_r06.csv (%d rows, %d jurisdictions)",
-                nrow(national_ts), nrow(municipal), n_distinct(municipal$jurisdiction)))
-message("検証：自治体合計 = PDF合計行 = 全国値（犬の引取り・返還＋譲渡・殺処分）")
+message(sprintf("OK: national_timeseries.csv (%d rows), municipal_r06.csv (%d rows), municipal_panel.csv (%d rows, FY%d-%d)",
+                nrow(national_ts), nrow(municipal), nrow(municipal_panel),
+                min(municipal_panel$fiscal_year), max(municipal_panel$fiscal_year)))
+message("検証：各年度で 自治体合計 = PDF合計行 = 全国値（犬の引取り・返還＋譲渡・殺処分）")
